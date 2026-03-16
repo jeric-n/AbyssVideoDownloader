@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - master
+    tags:
+      - "v*"
     paths-ignore:
       - "**.md"
   workflow_dispatch:
@@ -21,30 +23,34 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Clone Repository
-        run: |
-          git clone https://github.com/abdlhay/AbyssVideoDownloader.git
-          cd AbyssVideoDownloader
-
       - name: Make Gradle Executable
-        run: chmod +x AbyssVideoDownloader/gradlew
+        run: chmod +x ./gradlew
 
       - name: Build AbyssVideoDownloader
-        run: |
-          cd AbyssVideoDownloader
-          ./gradlew build
+        run: ./gradlew build
+
+      - name: Upload JAR Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: abyss-dl
+          path: build/libs/abyss-dl.jar
+          if-no-files-found: error
 
       - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
         id: create_release
         uses: softprops/action-gh-release@v2.0.6
         with:
-          tag_name: v1.6.1
+          tag_name: ${{ github.ref_name }}
           name: abyss-dl-${{ github.ref_name }}
-          files: AbyssVideoDownloader/build/libs/abyss-dl.jar
+          files: build/libs/abyss-dl.jar
           draft: true
