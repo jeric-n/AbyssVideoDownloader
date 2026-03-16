@@ -22,11 +22,18 @@ class CliArguments(private val args: Array<String>) {
 
         for (i in args.indices) {
             if (args[i] in arrayOf("--header", "-H") && i + 1 < args.size) {
-                val (key, value) = args[i + 1].split(":", limit = 2).map { it.trim() }
+                val parts = args[i + 1].split(":", limit = 2)
+                if (parts.size != 2) {
+                    Logger.error("Invalid header format '${args[i + 1]}'. Use 'Header-Name: Header-Value'.")
+                    continue
+                }
+
+                val key = parts[0].trim()
+                val value = parts[1].trim()
                 if (key.isNotEmpty() && value.isNotEmpty()) {
                     headers[key] = value
                 } else {
-                    Logger.error("Invalid header format. Use 'Header-Name: Header-Value'")
+                    Logger.error("Invalid header format '${args[i + 1]}'. Use 'Header-Name: Header-Value'.")
                 }
             }
         }
@@ -40,10 +47,9 @@ class CliArguments(private val args: Array<String>) {
      * @return The output file path as a String, or null if not specified.
      */
     fun getOutputFileName(): String? {
-        val index = args.indexOf("-o")
+        val index = args.indexOfFirst { it == "-o" || it == "--output" }
         if (index != -1 && index + 1 < args.size) {
-            val filePath = args[index + 1]
-            return  filePath
+            return args[index + 1]
         }
         return null
     }
@@ -87,10 +93,7 @@ class CliArguments(private val args: Array<String>) {
             exitProcess(0)
         }
 
-        val relevantArgs = args.filterNot { arg ->
-            arg.startsWith("-o") || arg.startsWith("-H") || arg.startsWith("--header") ||
-                    arg.startsWith("-c") || arg.startsWith("--connection")
-        }
+        val relevantArgs = collectPositionalArguments()
 
         if (relevantArgs.isEmpty()) {
             Logger.error("No valid video IDs or URLs provided.")
@@ -98,19 +101,40 @@ class CliArguments(private val args: Array<String>) {
         }
 
 
-        val lastArg = relevantArgs.first()
+        val input = relevantArgs.first()
 
         return when {
-            File(lastArg).exists() -> {
-                File(lastArg).readLines().flatMap { it.parseVideoIdOrUrlWithResolution() }
+            File(input).exists() -> {
+                File(input).readLines()
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && !it.startsWith("#") }
+                    .flatMap { it.parseVideoIdOrUrlWithResolution() }
             }
-            lastArg.contains(",") -> {
-                lastArg.split(",").flatMap { it.trim().parseVideoIdOrUrlWithResolution() }
+            input.contains(",") -> {
+                input.split(",").flatMap { it.trim().parseVideoIdOrUrlWithResolution() }
             }
             else -> {
-                args.joinToString(" ").trim().parseVideoIdOrUrlWithResolution()
+                relevantArgs.joinToString(" ").trim().parseVideoIdOrUrlWithResolution()
             }
         }
+    }
+
+    private fun collectPositionalArguments(): List<String> {
+        val positionalArgs = mutableListOf<String>()
+        var index = 0
+
+        while (index < args.size) {
+            when (args[index]) {
+                "-o", "--output", "-H", "--header", "-c", "--connections" -> index += 2
+                "--verbose" -> index += 1
+                else -> {
+                    positionalArgs += args[index]
+                    index += 1
+                }
+            }
+        }
+
+        return positionalArgs
     }
 
 }

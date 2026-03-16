@@ -192,12 +192,12 @@ You can build the AbyssVideoDownloader project using GitHub Actions by following
 
 Here are the planned tasks and features for future updates:
 
-- [ ] Clean Code.
+- [x] Clean Code.
 - [x] Add support for multiple parallel downloads.
 - [x] Integrate dependency injection
-- [ ] Improve error handling and provide more descriptive messages for common issues.
+- [x] Improve error handling and provide more descriptive messages for common issues.
 - [x] resume logic for failed downloads.
-- [ ] Implement retry
+- [x] Implement retry
 - [x] Enhance logging with different verbosity levels (e.g., debug, info, error).
 - [ ] Add support for proxy configuration.
 - [ ] Add a graphical user interface (GUI) for easier interaction or maybe an android app

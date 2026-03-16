@@ -1,6 +1,7 @@
 import com.abmo.di.koinModule
 import com.abmo.services.VideoDownloader
 import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
@@ -12,6 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.fail
 
+@EnabledIfEnvironmentVariable(named = "RUN_INTEGRATION_TESTS", matches = "true")
 class VideoDownloaderIntegrationTest : KoinComponent {
 
     private val videoDownloader: VideoDownloader by inject()

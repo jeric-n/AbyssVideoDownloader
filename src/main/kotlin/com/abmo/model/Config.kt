@@ -7,6 +7,6 @@ data class Config(
     val url: String,
     val resolution: String,
     var outputFile: File?,
-    val header: Map<String, String>? = null,
+    val headers: Map<String, String> = emptyMap(),
     val connections: Int = DEFAULT_CONCURRENT_DOWNLOAD_LIMIT
 )

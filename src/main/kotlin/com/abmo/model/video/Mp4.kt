@@ -20,6 +20,7 @@ fun Mp4.toSimpleVideo(resolution: String): SimpleVideo {
         md5_id = md5_id,
         label = source?.label,
         size = source?.size,
+        partSize = source?.partSize?.toLong(),
         url = buildSegmentUrl(domains?.firstOrNull(), source?.sub),
         path = source?.path,
         resId = source?.res_id

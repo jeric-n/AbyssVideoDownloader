@@ -1,27 +1,32 @@
 package com.abmo.services
 
+import com.abmo.common.AbyssDownloaderException
+import com.abmo.common.Constants.DEFAULT_FRAGMENT_SIZE_IN_BYTES
+import com.abmo.common.Constants.abyssDefaultHeaders
 import com.abmo.common.Logger
 import com.abmo.crypto.CryptoHelper
 import com.abmo.model.Config
-import com.abmo.model.SimpleVideo
 import com.abmo.model.Datas
+import com.abmo.model.SimpleVideo
 import com.abmo.model.video.Mp4
 import com.abmo.model.video.Video
 import com.abmo.model.video.toSimpleVideo
 import com.abmo.util.displayProgressBar
 import com.abmo.util.toObject
-import com.mashape.unirest.http.Unirest
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import java.io.File
-import java.util.*
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -30,51 +35,39 @@ class VideoDownloader: KoinComponent {
     private val cryptoHelper: CryptoHelper by inject()
     private val httpClientManager: HttpClientManager by inject()
 
-    companion object {
-        private const val FRAGMENT_SIZE_IN_BYTES = 2097152L
-    }
-
-    /**
-     * Downloads video segments in parallel and merges them into a single MP4 file.
-     * This function uses coroutines for concurrent downloading with a limit on the number of concurrent downloads.
-     *
-     * @param config The configuration containing settings like output file path and connection limits, resolution.
-     * @param videoMetadata The metadata of the video, used to generate segment data and the decryption key.
-     * @throws Exception If there are errors during the download or file operations.
-     */
     suspend fun downloadSegmentsInParallel(config: Config, videoMetadata: Mp4?) {
-        val simpleVideo = videoMetadata?.toSimpleVideo(config.resolution)
-        val segmentTokens = generateSegmentTokens(simpleVideo)
+        val simpleVideo = videoMetadata
+            ?.toSimpleVideo(config.resolution)
+            ?.takeIf { it.size != null && it.url != null && it.resId != null && it.md5_id != null }
+            ?: throw AbyssDownloaderException(
+                "Resolution '${config.resolution}' is not available or the metadata is incomplete."
+            )
 
-        val tempDir = initializeDownloadTempDir(config, simpleVideo, segmentTokens.size)
-
-        val segmentsToDownload = segmentTokens.filter { (index, _) -> index in tempDir.second }.ifEmpty {
-            segmentTokens
+        val fragmentSize = simpleVideo.partSize?.takeIf { it > 0 } ?: DEFAULT_FRAGMENT_SIZE_IN_BYTES
+        val segmentTokens = generateSegmentTokens(simpleVideo, fragmentSize)
+        if (segmentTokens.isEmpty()) {
+            throw AbyssDownloaderException("No downloadable segments were generated for '${simpleVideo.slug}'.")
         }
 
-        // reference: https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines.sync/-semaphore/
-        // used to limit the number of concurrent coroutines executing the download tasks.
+        val resumeState = initializeDownloadTempDir(config, simpleVideo, segmentTokens.size, fragmentSize)
+        val segmentsToDownload = segmentTokens.filterKeys { it in resumeState.missingSegments }
         val semaphore = Semaphore(config.connections)
-        val totalSegments = segmentsToDownload.size
-        val mediaSize = segmentsToDownload.size * FRAGMENT_SIZE_IN_BYTES
-        val downloadedSegments = AtomicInteger(0)
-        val totalBytesDownloaded = AtomicLong(0L)
-
+        val totalSegments = segmentTokens.size
+        val mediaSize = simpleVideo.size ?: totalSegments * fragmentSize
+        val downloadedSegments = AtomicInteger(resumeState.existingSegments.size)
+        val totalBytesDownloaded = AtomicLong(resumeState.existingBytes)
         val startTime = System.currentTimeMillis()
 
         coroutineScope {
-            val downloadJobs = segmentsToDownload.entries.mapIndexed { _, segmentToken ->
-                val segmentUrl = "${simpleVideo?.url}/sora/${simpleVideo?.size}/${segmentToken.value}"
+            val downloadJobs = segmentsToDownload.map { (index, segmentToken) ->
+                val segmentUrl = "${simpleVideo.url}/sora/${simpleVideo.size}/$segmentToken"
                 async(Dispatchers.IO) {
-                    val index = segmentToken.key
                     semaphore.withPermit {
-                        requestSegment(segmentUrl, segmentToken.value, index).collect { chunk ->
-                            File(tempDir.first, "segment_$index").appendBytes(chunk)
-                            totalBytesDownloaded.addAndGet(chunk.size.toLong())
-                        }
+                        val segmentBytes = requestSegment(segmentUrl, index, abyssDefaultHeaders + config.headers)
+                        File(resumeState.tempFolder, "segment_$index").writeBytes(segmentBytes)
+                        totalBytesDownloaded.addAndGet(segmentBytes.size.toLong())
                     }
                     downloadedSegments.incrementAndGet()
-
                 }
             }
 
@@ -84,209 +77,210 @@ class VideoDownloader: KoinComponent {
                     lastUpdateTime = displayProgressBar(
                         mediaSize,
                         totalSegments,
-                        totalBytesDownloaded.toLong(),
+                        totalBytesDownloaded.get(),
                         downloadedSegments.get(),
                         startTime,
                         lastUpdateTime
                     )
-                    delay(1000)
+                    delay(1_000)
                 }
             }
-            downloadJobs.awaitAll()
-            progressJob.cancel()
-        }
-        println("\n")
-        Logger.debug("All segments have been downloaded successfully!")
-        Logger.info("merging segments into mp4 file...")
-        config.outputFile?.let { mergeSegmentsIntoMp4File(tempDir.first, it) }
 
+            try {
+                downloadJobs.awaitAll()
+            } finally {
+                progressJob.cancel()
+            }
+        }
+
+        println()
+        Logger.debug("All segments have been downloaded successfully!")
+        Logger.info("Merging segments into MP4 file...")
+        config.outputFile?.let { mergeSegmentsIntoMp4File(resumeState.tempFolder, it) }
+    }
+
+    fun getVideoMetaData(url: String, headers: Map<String, String> = emptyMap()): Mp4 {
+        val response = httpClientManager.makeHttpRequest(url, headers)
+        val encryptedData = response.body
+            ?: throw AbyssDownloaderException("The metadata response for $url did not include a body.")
+        return parseEncryptedMp4MetadataFromHtml(encryptedData)
+    }
+
+    private fun parseEncryptedMp4MetadataFromHtml(html: String): Mp4 {
+        val jsCode = Jsoup.parse(html)
+            .select("script")
+            .find { it.html().contains("datas") }
+            ?.html()
+            ?: throw AbyssDownloaderException("No encoded media metadata was found in the provided HTML.")
+
+        val datasRegex = Regex("""const\s+datas\s*=\s*"([^"]*)"""")
+        val datas = datasRegex.find(jsCode)?.groups?.get(1)?.value
+            ?: throw AbyssDownloaderException("The encoded metadata payload could not be extracted from the page.")
+
+        val decodedDatas = try {
+            String(Base64.getDecoder().decode(datas), Charsets.ISO_8859_1)
+        } catch (e: IllegalArgumentException) {
+            throw AbyssDownloaderException("The metadata payload is not valid Base64 data.", e)
+        }
+
+        val mediaMetadata = try {
+            decodedDatas.toObject<Datas>()
+        } catch (e: Exception) {
+            throw AbyssDownloaderException("The metadata payload could not be parsed.", e)
+        }
+
+        val encryptedMediaMetadata = mediaMetadata.media
+            ?: throw AbyssDownloaderException("The metadata payload did not contain encrypted media data.")
+
+        val mediaKey = "${mediaMetadata.user_id}:${mediaMetadata.slug}:${mediaMetadata.md5_id}"
+        val decryptionKey = cryptoHelper.getKey(mediaKey).toByteArray()
+
+        return try {
+            cryptoHelper.decryptString(encryptedMediaMetadata, decryptionKey)
+                .toObject<Video>()
+                .mp4
+                ?.copy(slug = mediaMetadata.slug, md5_id = mediaMetadata.md5_id)
+                ?: throw AbyssDownloaderException("No MP4 sources were found in the decrypted metadata.")
+        } catch (e: AbyssDownloaderException) {
+            throw e
+        } catch (e: Exception) {
+            throw AbyssDownloaderException("Failed to decrypt the media metadata.", e)
+        }
     }
 
     private fun mergeSegmentsIntoMp4File(segmentFolderPath: File, output: File) {
-        val segmentFiles  = segmentFolderPath.listFiles { file -> file.name.startsWith("segment_") }
+        val segmentFiles = segmentFolderPath.listFiles { file -> file.name.startsWith("segment_") }
             ?.toList()
             ?.sortedBy { it.name.removePrefix("segment_").toIntOrNull() }
             ?: emptyList()
-        segmentFiles.forEach {
-            output.appendBytes(it.readBytes())
+
+        if (segmentFiles.isEmpty()) {
+            throw AbyssDownloaderException("No downloaded segments were found in ${segmentFolderPath.absolutePath}.")
+        }
+
+        output.outputStream().buffered().use { outputStream ->
+            segmentFiles.forEach { segment -> outputStream.write(segment.readBytes()) }
         }
 
         Logger.success("Segments merged successfully.")
 
-        if (segmentFolderPath.exists() && segmentFolderPath.isDirectory) {
-            val files = segmentFolderPath.listFiles()
-
-            if (files != null) {
-                for (file in files) {
-                    file.delete()
-                }
+        segmentFiles.forEach { file ->
+            if (!file.delete()) {
+                Logger.warn("Failed to delete temporary segment '${file.absolutePath}'.")
             }
-
-            if (!segmentFolderPath.delete()) {
-                Logger.error("Failed to delete folder: ${segmentFolderPath.absolutePath}")
-//                Logger.info("Deleted temporary folder at: ${segmentFolderPath.absolutePath}")
-            }
-        } else {
-            Logger.error("Folder does not exist or is not a directory: ${segmentFolderPath.absolutePath}")
-        }
-    }
-
-
-    /**
-     * Sends an HTTP GET request to retrieve and decode video metadata.
-     *
-     * @param url The URL to send the GET request to.
-     * @param headers A map of headers to include in the request.
-     * @return The decoded video metadata, or null if the extraction or decoding fails.
-     */
-    fun getVideoMetaData(url: String, headers: Map<String, String?>?): Mp4? {
-        val response = httpClientManager.makeHttpRequest(url, headers)
-        val encryptedData = response?.body ?: return null
-        val videoData = parseEncryptedMp4MetadataFromHtml(encryptedData)
-        return videoData
-
-    }
-
-
-    private fun parseEncryptedMp4MetadataFromHtml(html: String): Mp4? {
-       val jsCode = Jsoup.parse(html)
-           .select("script")
-           .find { it.html().contains("datas") }
-           ?.html()
-
-
-        if (jsCode == null) {
-            Logger.error("No encoded media metadata found in the provided HTML.")
-            return null
-        }
-        val datasRegex = Regex("""const\s+datas\s*=\s*"([^"]*)"""")
-        val datas = datasRegex.find(jsCode)?.groups?.get(1)?.value
-        val decodedDatas = String(Base64.getDecoder().decode(datas), Charsets.ISO_8859_1)
-        val mediaMetadata = decodedDatas.toObject<Datas>()
-        val encryptedMediaMetadata = mediaMetadata.media
-
-        if (encryptedMediaMetadata == null) {
-            Logger.error("failed to get encrypted media")
-            return null
         }
 
-        val mediaKey = "${mediaMetadata.user_id}:${mediaMetadata.slug}:${mediaMetadata.md5_id}"
-        val decryptionKey = cryptoHelper.getKey(mediaKey).toByteArray()
-        val mediaSources = cryptoHelper.decryptString(encryptedMediaMetadata, decryptionKey)
-            .toObject<Video>()
-            .mp4?.copy(
-                slug = mediaMetadata.slug,
-                md5_id = mediaMetadata.md5_id
-            )
-
-        return mediaSources
+        if (!segmentFolderPath.delete()) {
+            Logger.warn("Failed to delete temporary folder '${segmentFolderPath.absolutePath}'.")
+        }
     }
 
     private fun initializeDownloadTempDir(
         config: Config,
-        simpleVideo: SimpleVideo?,
-        totalSegments: Int
-    ): Pair<File, List<Int>> {
-        val tempFolderName = "temp_${simpleVideo?.slug}_${simpleVideo?.label}"
-        // no need to check if path exists before creating temp folder we already did that in Main.kt
+        simpleVideo: SimpleVideo,
+        totalSegments: Int,
+        fragmentSize: Long
+    ): ResumeState {
+        val tempFolderName = "temp_${simpleVideo.slug}_${simpleVideo.label}"
         val tempFolder = File(config.outputFile?.parentFile, tempFolderName)
 
-        if (tempFolder.exists() && tempFolder.isDirectory) {
-            Logger.info("Resuming download from temporary folder: $tempFolderName. Continuing from previously downloaded segments.")
-            println("\n")
-            val existingSegments = tempFolder.listFiles { file ->
-                if (
-                    file.isFile &&
-                    file.name.matches(Regex("segment_\\d+")) &&
-                    file.length() < FRAGMENT_SIZE_IN_BYTES) {
+        if (!tempFolder.exists()) {
+            Logger.info("Creating temporary folder $tempFolderName")
+            println()
+            tempFolder.mkdirs()
+            return ResumeState(tempFolder, (0 until totalSegments).toSet(), emptySet(), 0L)
+        }
+
+        Logger.info("Resuming download from temporary folder: $tempFolderName.")
+        println()
+
+        val existingSegments = mutableSetOf<Int>()
+        var existingBytes = 0L
+
+        tempFolder.listFiles { file -> file.isFile && file.name.matches(Regex("segment_\\d+")) }
+            ?.forEach { file ->
+                val index = file.name.removePrefix("segment_").toIntOrNull() ?: return@forEach
+                if (index !in 0 until totalSegments) {
+                    file.delete()
+                    return@forEach
+                }
+                val isLastSegment = index == totalSegments - 1
+                val isValidSize = file.length() == fragmentSize || (isLastSegment && file.length() in 1 until fragmentSize)
+
+                if (isValidSize) {
+                    existingSegments += index
+                    existingBytes += file.length()
+                } else {
                     file.delete()
                 }
-                file.isFile && file.name.matches(Regex("segment_\\d+"))
-            }?.mapNotNull { file ->
-                file.name.removePrefix("segment_").toIntOrNull()
-            }?.toSet() ?: emptySet()
+            }
 
-            val allSegmentNames = (0 until totalSegments).toList()
-
-            val missingSegmentNames = allSegmentNames.filterNot { it in existingSegments }
-
-            return tempFolder to missingSegmentNames
-        } else {
-            Logger.info("Creating temporary folder $tempFolderName")
-            println("\n")
-            tempFolder.mkdirs()
-        }
-        return tempFolder to emptyList()
+        val missingSegments = (0 until totalSegments).filterNot(existingSegments::contains).toSet()
+        return ResumeState(tempFolder, missingSegments, existingSegments, existingBytes)
     }
 
-    private fun generateRanges(size: Long, step: Long = FRAGMENT_SIZE_IN_BYTES): List<LongRange> {
-        val ranges = mutableListOf<LongRange>()
-
-        // if the size is less than or equal to step size return a single range
-        if (size <= step) {
-            ranges.add(0 until size)
-            return ranges
+    private fun generateRanges(size: Long, step: Long): List<LongRange> {
+        if (size <= 0) {
+            return emptyList()
         }
 
+        val ranges = mutableListOf<LongRange>()
         var start = 0L
+
         while (start < size) {
-            val end = minOf(start + step, size) // ensure the end doesn't exceed the size
-            ranges.add(start until end)
+            val end = minOf(start + step, size)
+            ranges += start until end
             start = end
         }
 
         return ranges
     }
 
-
-    private fun generateSegmentTokens(simpleVideo: SimpleVideo?): Map<Int, String> {
+    private fun generateSegmentTokens(simpleVideo: SimpleVideo, fragmentSize: Long): Map<Int, String> {
         Logger.debug("Generating segment request tokens.")
-        val fragmentList = mutableMapOf<Int, String>()
-        val encryptionKey = cryptoHelper.getKey(simpleVideo?.size)
-        if (simpleVideo?.size != null) {
-            val ranges = generateRanges(simpleVideo.size)
-            ranges.forEachIndexed { index, _ ->
-                val path = "/mp4/${simpleVideo.md5_id}/${simpleVideo.resId}/${simpleVideo.size}/$FRAGMENT_SIZE_IN_BYTES/$index"
-                val encryptedBody = cryptoHelper.encryptAESCTR(path, encryptionKey)
-                fragmentList[index] = doubleEncodeToBase64(encryptedBody)
-            }
-            Logger.debug("${fragmentList.size} request token generated")
-            return fragmentList
-        }
-        return emptyMap()
+        val size = simpleVideo.size
+            ?: throw AbyssDownloaderException("The selected video source does not include its size.")
+        val md5Id = simpleVideo.md5_id
+            ?: throw AbyssDownloaderException("The selected video source does not include its media id.")
+        val resId = simpleVideo.resId
+            ?: throw AbyssDownloaderException("The selected video source does not include its resolution id.")
+        val encryptionKey = cryptoHelper.getKey(size)
+
+        val fragmentList = generateRanges(size, fragmentSize).mapIndexed { index, _ ->
+            val path = "/mp4/$md5Id/$resId/$size/$fragmentSize/$index"
+            val encryptedBody = cryptoHelper.encryptAESCTR(path, encryptionKey)
+            index to doubleEncodeToBase64(encryptedBody)
+        }.toMap()
+
+        Logger.debug("${fragmentList.size} request tokens generated.")
+        return fragmentList
     }
 
     private fun doubleEncodeToBase64(input: String): String {
-        val first = Base64.getEncoder()
+        val firstPass = Base64.getEncoder()
             .encodeToString(input.toByteArray(Charsets.ISO_8859_1))
             .replace("=", "")
 
         return Base64.getEncoder()
-            .encodeToString(first.toByteArray())
+            .encodeToString(firstPass.toByteArray())
             .replace("=", "")
     }
 
-
-    private suspend fun requestSegment(url: String, token: String, index: Int? = null): Flow<ByteArray> = flow {
-        Logger.debug("[$index] Starting request to $url with token token: $token")
-        val response = Unirest.get(url)
-            .header("Referer", "https://abysscdn.com/")
-            .asBinary()
-
-        val rawBody = response.rawBody
-        val responseCode = response.status
-
-        Logger.debug("[$index] Received response with status $responseCode\n", responseCode !in 200..299)
-
-        val buffer = ByteArray(65536)
-        var bytesRead: Int
-
-        rawBody.use { stream ->
-            while (stream.read(buffer).also { bytesRead = it } != -1) {
-                emit(buffer.copyOf(bytesRead))
-            }
+    private fun requestSegment(url: String, index: Int, headers: Map<String, String>): ByteArray {
+        Logger.debug("[$index] Starting segment request to $url")
+        return try {
+            val segmentBytes = httpClientManager.downloadBinary(url, headers)
+            Logger.debug("[$index] Downloaded ${segmentBytes.size} bytes.")
+            segmentBytes
+        } catch (e: Exception) {
+            throw AbyssDownloaderException("Failed to download segment $index from $url. ${e.message}", e)
         }
-    }.flowOn(Dispatchers.IO)
+    }
 
-
+    private data class ResumeState(
+        val tempFolder: File,
+        val missingSegments: Set<Int>,
+        val existingSegments: Set<Int>,
+        val existingBytes: Long
+    )
 }

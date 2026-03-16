@@ -9,9 +9,15 @@ import org.koin.core.component.inject
 class ProviderDispatcher: KoinComponent {
 
     private val javaScriptExecutor: JavaScriptExecutor by inject()
+    private val providerFactories: List<Pair<(String) -> Boolean, () -> Provider>> = listOf(
+        Pair({ host -> host.contains("tvphim") }, { TvphimProvider(javaScriptExecutor) }),
+        Pair({ host -> host == "sieutamphim.com" }, { SieutamphimProvider() }),
+        Pair({ host -> host == "phimbet.biz" }, { PhimbetProvider() }),
+        Pair({ host -> host.contains("motchill") || host == "subnhanh.win" }, { MotchillProvider() }),
+        Pair({ host -> host == "animet3.biz" }, { Animet3Provider() }),
+        Pair({ host -> host == "tvhayw.org" }, { TvhaywProvider() })
+    )
 
-    // still this isn't an efficient and clean way to map domains to a provider
-    // it will become a mess once more hosts are added
     /**
      * Retrieves the appropriate provider for the given URL.
      *
@@ -23,18 +29,9 @@ class ProviderDispatcher: KoinComponent {
      * @return An instance of the Provider that matches the URL's host.
      */
     fun getProviderForUrl(url: String): Provider {
-        url.getHost().apply {
-           return when {
-                contains("tvphim") -> TvphimProvider(javaScriptExecutor)
-                equals("sieutamphim.com") -> SieutamphimProvider()
-                equals("phimbet.biz") -> PhimbetProvider()
-                contains("motchill") || equals("subnhanh.win") -> MotchillProvider()
-                equals("animet3.biz") -> Animet3Provider()
-                equals("tvhayw.org") -> TvhaywProvider()
-
-                else -> AbyssToProvider()
-            }
-        }
+        val host = url.getHost()
+        return providerFactories.firstOrNull { (matches, _) -> matches(host) }?.second?.invoke()
+            ?: AbyssToProvider()
     }
 
 }

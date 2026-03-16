@@ -5,6 +5,7 @@ data class SimpleVideo(
     val md5_id: Int? = null,
     val label: String? = null,
     val size: Long? = null,
+    val partSize: Long? = null,
     var range: Range? = null,
     val url: String? = null,
     val path: String? = null,

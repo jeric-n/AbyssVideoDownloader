@@ -4,9 +4,13 @@ import com.abmo.common.Constants
 import com.abmo.common.Constants.ABYSS_BASE_URL
 import com.abmo.common.Logger
 import com.abmo.model.Config
+import com.abmo.model.video.Source
 import com.abmo.services.ProviderDispatcher
 import com.abmo.services.VideoDownloader
-import com.abmo.util.*
+import com.abmo.util.CliArguments
+import com.abmo.util.extractReferer
+import com.abmo.util.isValidPath
+import com.abmo.util.isValidUrl
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 import org.koin.core.parameter.parametersOf
@@ -20,67 +24,113 @@ class Application(private val args: Array<String>) : KoinComponent {
     private val cliArguments: CliArguments by inject { parametersOf(args) }
 
     suspend fun run() {
-
         val outputFileName = cliArguments.getOutputFileName()
-        val headers = cliArguments.getHeaders()
+        val userHeaders = cliArguments.getHeaders().orEmpty()
         val numberOfConnections = cliArguments.getParallelConnections()
-        val videoIdsOrUrls = cliArguments.getVideoIdsOrUrlsWithResolutions()
+        val videoRequests = cliArguments.getVideoIdsOrUrlsWithResolutions()
         Constants.VERBOSE = cliArguments.isVerboseEnabled()
 
-        if (outputFileName != null) {
-            if (!isValidPath(outputFileName)) {
-                exitProcess(0)
-            }
+        if (outputFileName != null && !isValidPath(outputFileName)) {
+            exitProcess(0)
         }
 
-        videoIdsOrUrls.forEach { pairs ->
-            val videoUrl = pairs.first
-            val resolution = pairs.second
-
-            val dispatcher = providerDispatcher.getProviderForUrl(videoUrl)
-            val videoID = dispatcher.getVideoID(videoUrl)
-            val defaultHeader = if (videoUrl.isValidUrl()) {
-                mapOf("Referer" to videoUrl.extractReferer())
-            } else { emptyMap() }
-
-            val url = "$ABYSS_BASE_URL/?v=$videoID"
-            val videoMetadata = videoDownloader.getVideoMetaData(url, headers ?: defaultHeader)
-            val videoSources = videoMetadata?.sources
-                ?.sortedBy { it?.label?.filter { char -> char.isDigit() }?.toIntOrNull() }
-
-            if (videoSources == null) {
-                Logger.error("Video with ID $videoID not found")
-            } else {
-                val mappedResolution = when(resolution) {
-                    "h" -> videoSources.maxBy { it?.size!! }?.label
-                    "l" -> videoSources.minBy { it?.size!! }?.label
-                    "m" -> videoSources.sortedBy { it?.size }.let { sorted ->
-                            sorted.getOrNull((sorted.size - 1) / 2) }?.label
-                    else -> videoSources.maxBy { it?.size!! }?.label
-                }
-                val defaultFileName = "${url.getParameter("v")}_${mappedResolution}_${System.currentTimeMillis()}.mp4"
-                val outputFile = outputFileName?.let { File(it) } ?: run {
-                    Logger.warn("No output file specified. The video will be saved to the current directory as '$defaultFileName'.\n")
-                    File(".", defaultFileName) // Default directory and name for saving video
-                }
-                if (mappedResolution != null) {
-                    val config = Config(url, mappedResolution, outputFile, headers, numberOfConnections)
-                    Logger.info("video with id $videoID and resolution $mappedResolution being processed...\n")
-                    try {
-                        videoDownloader.downloadSegmentsInParallel(config, videoMetadata)
-                    } catch (e: Exception) {
-                        Logger.error(e.message.toString())
-                    }
-                }
-            }
-            if (videoIdsOrUrls.size > 1) {
-                println("-----------------------------------------$videoID--------------------------------------------------------")
-            }
+        if (outputFileName != null && videoRequests.size > 1) {
+            Logger.error("A single output file cannot be reused for multiple videos. Omit '-o' or download one video at a time.")
+            exitProcess(0)
         }
 
-
-
-
+        videoRequests.forEach { (videoUrl, resolution) ->
+            processVideoRequest(videoUrl, resolution, outputFileName, userHeaders, numberOfConnections)
+            if (videoRequests.size > 1) {
+                println("-----------------------------------------")
+            }
+        }
     }
 
+    private suspend fun processVideoRequest(
+        videoUrl: String,
+        resolution: String,
+        outputFileName: String?,
+        userHeaders: Map<String, String>,
+        numberOfConnections: Int
+    ) {
+        val provider = providerDispatcher.getProviderForUrl(videoUrl)
+        val videoId = provider.getVideoID(videoUrl)
+
+        if (videoId.isNullOrBlank()) {
+            Logger.error("Could not extract a video ID from '$videoUrl'. The source page may have changed or is unsupported.")
+            return
+        }
+
+        val headers = buildRequestHeaders(videoUrl, userHeaders)
+        val abyssUrl = "$ABYSS_BASE_URL/?v=$videoId"
+
+        try {
+            val videoMetadata = videoDownloader.getVideoMetaData(abyssUrl, headers)
+            val selectedSource = selectSource(videoMetadata.sources, resolution)
+
+            if (selectedSource?.label == null) {
+                val availableResolutions = videoMetadata.sources
+                    ?.mapNotNull { it?.label }
+                    ?.distinct()
+                    ?.joinToString(", ")
+                    ?: "none"
+                Logger.error("No downloadable source was found for '$videoId'. Available resolutions: $availableResolutions.")
+                return
+            }
+
+            val outputFile = resolveOutputFile(outputFileName, videoId, selectedSource.label)
+            val config = Config(
+                url = abyssUrl,
+                resolution = selectedSource.label,
+                outputFile = outputFile,
+                headers = headers,
+                connections = numberOfConnections
+            )
+
+            Logger.info("Processing video '$videoId' at resolution ${selectedSource.label}...")
+            videoDownloader.downloadSegmentsInParallel(config, videoMetadata)
+        } catch (e: Exception) {
+            Logger.error("Failed to process '$videoId': ${e.message ?: "Unexpected error."}")
+            Logger.debug(e.stackTraceToString(), isError = true)
+        }
+    }
+
+    private fun buildRequestHeaders(videoUrl: String, userHeaders: Map<String, String>): Map<String, String> {
+        val defaultHeaders = if (videoUrl.isValidUrl()) {
+            videoUrl.extractReferer()?.let { mapOf("Referer" to it) }.orEmpty()
+        } else {
+            emptyMap()
+        }
+
+        return defaultHeaders + userHeaders
+    }
+
+    private fun selectSource(sources: List<Source?>?, resolution: String): Source? {
+        val availableSources = sources.orEmpty()
+            .filterNotNull()
+            .filter { !it.label.isNullOrBlank() && it.size != null }
+            .sortedBy { it.size }
+
+        if (availableSources.isEmpty()) {
+            return null
+        }
+
+        return when (resolution.lowercase()) {
+            "l" -> availableSources.first()
+            "m" -> availableSources[(availableSources.size - 1) / 2]
+            "h" -> availableSources.last()
+            else -> availableSources.last()
+        }
+    }
+
+    private fun resolveOutputFile(outputFileName: String?, videoId: String, resolutionLabel: String): File {
+        if (outputFileName != null) {
+            return File(outputFileName)
+        }
+
+        val defaultFileName = "${videoId}_${resolutionLabel}_${System.currentTimeMillis()}.mp4"
+        Logger.warn("No output file specified. Saving to the current directory as '$defaultFileName'.")
+        return File(".", defaultFileName)
+    }
 }

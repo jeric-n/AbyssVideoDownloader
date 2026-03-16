@@ -6,6 +6,9 @@ object Constants {
      * The default maximum number of concurrent downloads allowed.
      */
     const val DEFAULT_CONCURRENT_DOWNLOAD_LIMIT = 4
+    const val DEFAULT_RETRY_ATTEMPTS = 3
+    const val DEFAULT_RETRY_DELAY_MS = 1_000L
+    const val DEFAULT_FRAGMENT_SIZE_IN_BYTES = 2_097_152L
 
     /**
      * Toggle for verbose logging.

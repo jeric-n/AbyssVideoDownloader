@@ -170,12 +170,12 @@ Làm theo các bước sau để tự xây dựng AbyssVideoDownloader:
 
 Danh sách các nhiệm vụ và tính năng sẽ được cập nhật trong tương lai:
 
-- [ ] Clean Code.
+- [x] Clean Code.
 - [x] Hỗ trợ tải đồng thời nhiều video.
 - [x] Tích hợp dependency injection.
-- [ ] Cải thiện xử lý lỗi và thêm thông báo mô tả.
+- [x] Cải thiện xử lý lỗi và thêm thông báo mô tả.
 - [x] Tiếp tục tải các tệp bị lỗi.
-- [ ] Thêm logic retry.
+- [x] Thêm logic retry.
 - [x] Cải thiện logging.
 - [ ] Hỗ trợ proxy.
 - [ ] Thêm giao diện đồ họa hoặc ứng dụng Android.
