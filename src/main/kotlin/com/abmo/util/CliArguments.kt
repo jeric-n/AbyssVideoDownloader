@@ -2,6 +2,7 @@ package com.abmo.util
 
 import com.abmo.common.Constants.DEFAULT_CONCURRENT_DOWNLOAD_LIMIT
 import com.abmo.common.Logger
+import com.abmo.model.RetryPolicy
 import java.io.File
 import kotlin.system.exitProcess
 
@@ -74,6 +75,30 @@ class CliArguments(private val args: Array<String>) {
         return DEFAULT_CONCURRENT_DOWNLOAD_LIMIT
     }
 
+    fun getRetryPolicy(): RetryPolicy {
+        val retryArgIndex = args.indexOf("--retry")
+        if (retryArgIndex == -1) {
+            return RetryPolicy.DEFAULT
+        }
+
+        if (retryArgIndex + 1 >= args.size) {
+            Logger.error("Missing value for '--retry'. Use a positive integer or 'inf'.")
+            exitProcess(0)
+        }
+
+        return when (val retryValue = args[retryArgIndex + 1].trim().lowercase()) {
+            "inf" -> RetryPolicy.INFINITE
+            else -> {
+                val attempts = retryValue.toIntOrNull()
+                if (attempts == null || attempts <= 0) {
+                    Logger.error("Invalid value for '--retry': '$retryValue'. Use a positive integer or 'inf'.")
+                    exitProcess(0)
+                }
+                RetryPolicy(attempts)
+            }
+        }
+    }
+
     /**
      * Checks if the verbose flag is enabled in the command-line arguments.
      *
@@ -125,7 +150,7 @@ class CliArguments(private val args: Array<String>) {
 
         while (index < args.size) {
             when (args[index]) {
-                "-o", "--output", "-H", "--header", "-c", "--connections" -> index += 2
+                "-o", "--output", "-H", "--header", "-c", "--connections", "--retry" -> index += 2
                 "--verbose" -> index += 1
                 else -> {
                     positionalArgs += args[index]

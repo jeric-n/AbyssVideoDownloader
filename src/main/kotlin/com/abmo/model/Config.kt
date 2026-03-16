@@ -8,5 +8,6 @@ data class Config(
     val resolution: String,
     var outputFile: File?,
     val headers: Map<String, String> = emptyMap(),
-    val connections: Int = DEFAULT_CONCURRENT_DOWNLOAD_LIMIT
+    val connections: Int = DEFAULT_CONCURRENT_DOWNLOAD_LIMIT,
+    val retryPolicy: RetryPolicy = RetryPolicy.DEFAULT
 )

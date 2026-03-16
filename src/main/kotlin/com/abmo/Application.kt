@@ -4,6 +4,7 @@ import com.abmo.common.Constants
 import com.abmo.common.Constants.ABYSS_BASE_URL
 import com.abmo.common.Logger
 import com.abmo.model.Config
+import com.abmo.model.RetryPolicy
 import com.abmo.model.video.Source
 import com.abmo.services.ProviderDispatcher
 import com.abmo.services.VideoDownloader
@@ -27,6 +28,7 @@ class Application(private val args: Array<String>) : KoinComponent {
         val outputFileName = cliArguments.getOutputFileName()
         val userHeaders = cliArguments.getHeaders().orEmpty()
         val numberOfConnections = cliArguments.getParallelConnections()
+        val retryPolicy = cliArguments.getRetryPolicy()
         val videoRequests = cliArguments.getVideoIdsOrUrlsWithResolutions()
         Constants.VERBOSE = cliArguments.isVerboseEnabled()
 
@@ -40,7 +42,7 @@ class Application(private val args: Array<String>) : KoinComponent {
         }
 
         videoRequests.forEach { (videoUrl, resolution) ->
-            processVideoRequest(videoUrl, resolution, outputFileName, userHeaders, numberOfConnections)
+            processVideoRequest(videoUrl, resolution, outputFileName, userHeaders, numberOfConnections, retryPolicy)
             if (videoRequests.size > 1) {
                 println("-----------------------------------------")
             }
@@ -52,7 +54,8 @@ class Application(private val args: Array<String>) : KoinComponent {
         resolution: String,
         outputFileName: String?,
         userHeaders: Map<String, String>,
-        numberOfConnections: Int
+        numberOfConnections: Int,
+        retryPolicy: RetryPolicy
     ) {
         val provider = providerDispatcher.getProviderForUrl(videoUrl)
         val videoId = provider.getVideoID(videoUrl)
@@ -66,7 +69,7 @@ class Application(private val args: Array<String>) : KoinComponent {
         val abyssUrl = "$ABYSS_BASE_URL/?v=$videoId"
 
         try {
-            val videoMetadata = videoDownloader.getVideoMetaData(abyssUrl, headers)
+            val videoMetadata = videoDownloader.getVideoMetaData(abyssUrl, headers, retryPolicy)
             val selectedSource = selectSource(videoMetadata.sources, resolution)
 
             if (selectedSource?.label == null) {
@@ -85,10 +88,11 @@ class Application(private val args: Array<String>) : KoinComponent {
                 resolution = selectedSource.label,
                 outputFile = outputFile,
                 headers = headers,
-                connections = numberOfConnections
+                connections = numberOfConnections,
+                retryPolicy = retryPolicy
             )
 
-            Logger.info("Processing video '$videoId' at resolution ${selectedSource.label}...")
+            Logger.info("Processing video '$videoId' at resolution ${selectedSource.label} with retry=${retryPolicy.displayValue}...")
             videoDownloader.downloadSegmentsInParallel(config, videoMetadata)
         } catch (e: Exception) {
             Logger.error("Failed to process '$videoId': ${e.message ?: "Unexpected error."}")

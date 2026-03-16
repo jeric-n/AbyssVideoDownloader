@@ -1,10 +1,10 @@
 package com.abmo.services
 
 import com.abmo.common.AbyssDownloaderException
-import com.abmo.common.Constants.DEFAULT_RETRY_ATTEMPTS
 import com.abmo.common.Constants.DEFAULT_RETRY_DELAY_MS
 import com.abmo.common.Logger
 import com.abmo.model.HttpResponse
+import com.abmo.model.RetryPolicy
 import com.github.zhkl0228.impersonator.ImpersonatorFactory
 import com.mashape.unirest.http.Unirest
 import okhttp3.OkHttpClient
@@ -16,9 +16,13 @@ class HttpClientManager {
     private val isWindows by lazy { isWindowsOS() }
     private val okHttpClient: OkHttpClient by lazy { createImpersonatedClient() }
 
-    fun makeHttpRequest(url: String, headers: Map<String, String> = emptyMap()): HttpResponse {
+    fun makeHttpRequest(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        retryPolicy: RetryPolicy = RetryPolicy.DEFAULT
+    ): HttpResponse {
         Logger.debug("Initiating HTTP request to $url")
-        return executeWithRetry("fetch metadata from $url") {
+        return executeWithRetry("fetch metadata from $url", retryPolicy) {
             if (isWindows) {
                 makeTextRequestWithUnirest(url, headers)
             } else {
@@ -27,9 +31,13 @@ class HttpClientManager {
         }
     }
 
-    fun downloadBinary(url: String, headers: Map<String, String> = emptyMap()): ByteArray {
+    fun downloadBinary(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        retryPolicy: RetryPolicy = RetryPolicy.DEFAULT
+    ): ByteArray {
         Logger.debug("Downloading binary content from $url")
-        return executeWithRetry("download segment from $url") {
+        return executeWithRetry("download segment from $url", retryPolicy) {
             if (isWindows) {
                 makeBinaryRequestWithUnirest(url, headers)
             } else {
@@ -135,35 +143,37 @@ class HttpClientManager {
 
     private fun <T> executeWithRetry(
         operationName: String,
-        maxAttempts: Int = DEFAULT_RETRY_ATTEMPTS,
+        retryPolicy: RetryPolicy,
         initialDelayMs: Long = DEFAULT_RETRY_DELAY_MS,
         block: () -> T
     ): T {
-        require(maxAttempts > 0) { "maxAttempts must be greater than zero." }
+        retryPolicy.maxAttempts?.let { require(it > 0) { "maxAttempts must be greater than zero." } }
 
         var delayMs = initialDelayMs
         var lastError: Exception? = null
+        var attempt = 1
 
-        for (attemptIndex in 0 until maxAttempts) {
+        while (retryPolicy.maxAttempts == null || attempt <= retryPolicy.maxAttempts) {
             try {
                 return block()
             } catch (e: Exception) {
                 lastError = e
-                val attempt = attemptIndex + 1
-                if (attempt == maxAttempts) {
+                val maxAttempts = retryPolicy.maxAttempts
+                if (maxAttempts != null && attempt == maxAttempts) {
                     break
                 }
 
                 Logger.warn(
-                    "$operationName failed on attempt $attempt/$maxAttempts: ${e.message}. Retrying..."
+                    "$operationName failed on attempt $attempt/${retryPolicy.displayValue}: ${e.message}. Retrying..."
                 )
                 Thread.sleep(delayMs)
                 delayMs = (delayMs * 2).coerceAtMost(8_000L)
+                attempt += 1
             }
         }
 
         throw AbyssDownloaderException(
-            "$operationName failed after $maxAttempts attempts. ${lastError?.message ?: "No additional details."}",
+            "$operationName failed after ${retryPolicy.displayValue} attempts. ${lastError?.message ?: "No additional details."}",
             lastError
         )
     }

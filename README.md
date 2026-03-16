@@ -124,6 +124,9 @@ To download a video, follow these steps:
 - **Connections**:  
   Use `-c <1-10>` to set concurrent connections (default: 4).
 
+- **Retries**:  
+  Use `--retry <count|inf>` to control request retries. Example: `--retry 5` or `--retry inf`. Defaults to `3`.
+
 - **Verbose Mode**:  
   Add `--verbose` for detailed output.
 
@@ -155,7 +158,17 @@ To download a video, follow these steps:
    java -jar abyss-dl.jar K8R6OOjS7 -H "Authorization: Bearer TOKEN" --header "Referer: https://example.com" -c 3 -o /path/to/my_video.mp4
    ```
 
-6. Download multiple videos with resolutions from a text file or inline:  
+6. **Download a video with custom retry behavior**:
+   ```bash
+   java -jar abyss-dl.jar K8R6OOjS7 --retry 5 -o my_video.mp4
+   ```
+
+7. **Keep retrying forever until the source becomes available again**:
+   ```bash
+   java -jar abyss-dl.jar K8R6OOjS7 --retry inf -o my_video.mp4
+   ```
+
+8. Download multiple videos with resolutions from a text file or inline:  
    **From text file:**  
    The file should list videos as:
    ```text

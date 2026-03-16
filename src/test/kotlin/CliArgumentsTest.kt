@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class CliArgumentsTest {
 
@@ -36,6 +37,12 @@ class CliArgumentsTest {
     }
 
     @Test
+    fun `getRetryPolicy parses finite and infinite retry values`() {
+        assertEquals(5, CliArguments(arrayOf("id", "--retry", "5")).getRetryPolicy().maxAttempts)
+        assertNull(CliArguments(arrayOf("id", "--retry", "inf")).getRetryPolicy().maxAttempts)
+    }
+
+    @Test
     fun `getVideoIdsOrUrlsWithResolutions ignores flag arguments and reads files`(@TempDir tempDir: Path) {
         val inputFile = tempDir.resolve("videos.txt")
         inputFile.writeText(
@@ -51,6 +58,7 @@ class CliArgumentsTest {
             arrayOf(
                 inputFile.toString(),
                 "-c", "5",
+                "--retry", "inf",
                 "-o", tempDir.resolve("output.mp4").toString(),
                 "--verbose"
             )
@@ -64,5 +72,6 @@ class CliArgumentsTest {
             ),
             arguments.getVideoIdsOrUrlsWithResolutions()
         )
+        assertTrue(arguments.getRetryPolicy().maxAttempts == null)
     }
 }

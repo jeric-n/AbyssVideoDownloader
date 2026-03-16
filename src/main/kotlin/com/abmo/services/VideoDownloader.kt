@@ -7,6 +7,7 @@ import com.abmo.common.Logger
 import com.abmo.crypto.CryptoHelper
 import com.abmo.model.Config
 import com.abmo.model.Datas
+import com.abmo.model.RetryPolicy
 import com.abmo.model.SimpleVideo
 import com.abmo.model.video.Mp4
 import com.abmo.model.video.Video
@@ -63,7 +64,12 @@ class VideoDownloader: KoinComponent {
                 val segmentUrl = "${simpleVideo.url}/sora/${simpleVideo.size}/$segmentToken"
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
-                        val segmentBytes = requestSegment(segmentUrl, index, abyssDefaultHeaders + config.headers)
+                        val segmentBytes = requestSegment(
+                            segmentUrl,
+                            index,
+                            abyssDefaultHeaders + config.headers,
+                            config.retryPolicy
+                        )
                         File(resumeState.tempFolder, "segment_$index").writeBytes(segmentBytes)
                         totalBytesDownloaded.addAndGet(segmentBytes.size.toLong())
                     }
@@ -99,8 +105,12 @@ class VideoDownloader: KoinComponent {
         config.outputFile?.let { mergeSegmentsIntoMp4File(resumeState.tempFolder, it) }
     }
 
-    fun getVideoMetaData(url: String, headers: Map<String, String> = emptyMap()): Mp4 {
-        val response = httpClientManager.makeHttpRequest(url, headers)
+    fun getVideoMetaData(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        retryPolicy: RetryPolicy = RetryPolicy.DEFAULT
+    ): Mp4 {
+        val response = httpClientManager.makeHttpRequest(url, headers, retryPolicy)
         val encryptedData = response.body
             ?: throw AbyssDownloaderException("The metadata response for $url did not include a body.")
         return parseEncryptedMp4MetadataFromHtml(encryptedData)
@@ -266,10 +276,15 @@ class VideoDownloader: KoinComponent {
             .replace("=", "")
     }
 
-    private fun requestSegment(url: String, index: Int, headers: Map<String, String>): ByteArray {
+    private fun requestSegment(
+        url: String,
+        index: Int,
+        headers: Map<String, String>,
+        retryPolicy: RetryPolicy
+    ): ByteArray {
         Logger.debug("[$index] Starting segment request to $url")
         return try {
-            val segmentBytes = httpClientManager.downloadBinary(url, headers)
+            val segmentBytes = httpClientManager.downloadBinary(url, headers, retryPolicy)
             Logger.debug("[$index] Downloaded ${segmentBytes.size} bytes.")
             segmentBytes
         } catch (e: Exception) {
